@@ -6,6 +6,7 @@ import sys
 import logging
 import sqlite3
 import datetime
+import aiohttp  # 引入 aiohttp 用于网络自检
 from logging.handlers import TimedRotatingFileHandler
 from contextlib import asynccontextmanager
 from discord.ext import commands
@@ -15,7 +16,7 @@ from typing import List, Optional
 import uvicorn
 
 
-# ================= 1. 日志配置 (Logger Setup) =================
+# ================= 1. 日志配置 =================
 
 def setup_logger():
     log_dir = "/data/logs"
@@ -52,13 +53,10 @@ DB_PATH = "/data/comic_threads.db"
 
 
 def init_db():
-    # 确保 data 目录存在
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # 创建表: comic_id (主键), thread_id
         c.execute('''CREATE TABLE IF NOT EXISTS threads
                      (comic_id TEXT PRIMARY KEY, thread_id INTEGER)''')
         conn.commit()
@@ -69,7 +67,7 @@ def init_db():
 
 
 # ================= 3. 配置加载逻辑 =================
-CONFIG_FILE = "/data/config.json"
+CONFIG_FILE = "data/config.json"
 
 
 def load_config():
@@ -87,8 +85,9 @@ def load_config():
                 file_config = json.load(f)
                 config.update(file_config)
         except Exception as e:
-            logger.warning(f"读取配置文件出错，将仅使用环境变量: {e}")
+            logger.warning(f"读取配置文件出错: {e}")
 
+    # 环境变量覆盖
     env_token = os.getenv("DISCORD_TOKEN")
     if env_token: config["discord_token"] = env_token
 
@@ -135,7 +134,7 @@ PROXY_URL = config.get("proxy_url", "")
 class PublishRequest(BaseModel):
     title: str
     content: str
-    comic_id: Optional[str] = None  # 新增字段: 漫画唯一ID
+    comic_id: Optional[str] = None
     cover: Optional[str] = None
     tags: List[str] = []
     attachment: List[str] = []
@@ -145,11 +144,38 @@ class PublishRequest(BaseModel):
 intents = discord.Intents.default()
 intents.message_content = True
 
+# 初始化 Bot
+# 注意：即使传了 proxy 参数，discord.py 有时也依赖系统环境变量。
+# 下面的 self-check 会帮我们验证 proxy 是否真正有效。
 bot = commands.Bot(
     command_prefix="!",
     intents=intents,
     proxy=PROXY_URL if PROXY_URL else None
 )
+
+
+# --- 新增：网络自检函数 ---
+async def check_proxy_connection(proxy_url):
+    """在启动 Bot 前测试代理连接是否真正通畅"""
+    target_url = "https://discord.com"
+    logger.info(f"正在进行网络自检 (目标: {target_url})...")
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)  # 10秒超时
+        async with aiohttp.ClientSession() as session:
+            async with session.get(target_url, proxy=proxy_url, timeout=timeout) as resp:
+                logger.info(f"网络自检通过! 状态码: {resp.status}")
+                return True
+    except asyncio.TimeoutError:
+        logger.error("网络自检失败: 连接超时 (Timeout)。请检查代理网速或防火墙。")
+    except aiohttp.ClientProxyConnectionError:
+        logger.error(f"网络自检失败: 无法连接到代理服务器 ({proxy_url})。请检查代理地址是否正确。")
+    except aiohttp.ClientSSLError:
+        logger.error("网络自检失败: SSL 证书验证错误。可能是代理服务器拦截了 HTTPS 证书。")
+    except Exception as e:
+        logger.error(f"网络自检失败: {type(e).__name__} - {e}")
+
+    return False
 
 
 @asynccontextmanager
@@ -159,10 +185,19 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     init_db()
 
+    # 打印代理信息
     if PROXY_URL:
-        logger.info(f"使用代理: {PROXY_URL}")
+        logger.info(f"配置代理: {PROXY_URL}")
+        # 执行自检 (这步很关键，能告诉你为什么卡住)
+        is_connected = await check_proxy_connection(PROXY_URL)
+        if not is_connected:
+            logger.warning("⚠️ 警告: 代理连接测试失败，Bot 可能会启动失败或卡住。")
+    else:
+        logger.info("未配置代理 (直连模式)")
 
+    logger.info("正在启动 Discord Bot...")
     bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
+
     yield
 
     logger.info("服务关闭中...")
@@ -186,7 +221,6 @@ async def on_ready():
 
 
 # ================= 6. 核心逻辑 =================
-
 @app.get("/")
 async def root():
     return {"status": "running", "bot_ready": bot.is_ready()}
@@ -195,10 +229,9 @@ async def root():
 @app.post("/api/publish")
 async def publish_post(request: PublishRequest):
     logger.info(f"收到请求 | Title: {request.title} | ComicID: {request.comic_id}")
-
     await bot.wait_until_ready()
 
-    # --- 1. 检查是否存在已有帖子 (如果提供了 comic_id) ---
+    # 1. 查重逻辑
     if request.comic_id:
         existing_thread_id = None
         try:
@@ -207,111 +240,67 @@ async def publish_post(request: PublishRequest):
             c.execute("SELECT thread_id FROM threads WHERE comic_id=?", (request.comic_id,))
             row = c.fetchone()
             conn.close()
-            if row:
-                existing_thread_id = row[0]
+            if row: existing_thread_id = row[0]
         except Exception as e:
-            logger.error(f"查询数据库失败: {e}")
+            logger.error(f"DB Error: {e}")
 
-        # 如果数据库中有记录，尝试获取帖子并回复
         if existing_thread_id:
             try:
-                # fetch_channel 可以获取指定 ID 的频道/帖子对象
                 thread = await bot.fetch_channel(existing_thread_id)
-
-                # 构造回复内容
                 today_str = datetime.date.today().strftime("%Y-%m-%d")
-                reply_content = f"{today_str} 又有人尝试下载本漫画。"
-
-                await thread.send(reply_content)
-                logger.info(f"漫画 {request.comic_id} 已存在 (Thread: {existing_thread_id})，已发送回复通知。")
-
-                return {
-                    "status": "replied",
-                    "thread_id": thread.id,
-                    "url": thread.jump_url,
-                    "note": "Existing thread found, replied instead of creating new."
-                }
+                await thread.send(f"{today_str} 又有人尝试下载本漫画。")
+                logger.info(f"已回复旧帖: {existing_thread_id}")
+                return {"status": "replied", "thread_id": thread.id, "url": thread.jump_url}
             except discord.NotFound:
-                logger.warning(f"记录中的帖子 {existing_thread_id} 已不存在(可能被删除)，将重新创建。")
-                # 帖子找不到了，继续往下执行，创建新帖
+                logger.warning("旧帖不存在，重新创建")
             except Exception as e:
-                logger.error(f"处理已有帖子时出错: {e}")
-                # 出错也继续尝试创建新帖，或者报错取决于需求，这里选择安全失败后继续创建
+                logger.error(f"回复出错: {e}")
 
-    # --- 2. 准备创建新帖子 ---
+    # 2. 新建逻辑
     channel = bot.get_channel(TARGET_FORUM_CHANNEL_ID)
-    if not channel:
-        logger.error(f"找不到频道 {TARGET_FORUM_CHANNEL_ID}")
-        raise HTTPException(status_code=500, detail="Bot无法找到指定频道")
+    if not channel: raise HTTPException(500, "Bot未连接或找不到频道")
 
-    if not isinstance(channel, discord.ForumChannel):
-        raise HTTPException(status_code=400, detail="目标不是论坛频道")
-
-    # 处理标签
-    applied_tags = []
-    if request.tags:
-        available_tags = channel.available_tags
-        tag_map = {t.name.lower(): t for t in available_tags}
-        for tag_name in request.tags:
-            found_tag = tag_map.get(tag_name.lower())
-            if found_tag:
-                applied_tags.append(found_tag)
-
-    # 处理文件
     discord_files = []
-    opened_files_handles = []
+    opened_files = []
 
     def add_file(path):
         if not path: return
-        if not os.path.exists(path):
-            logger.error(f"容器内找不到文件: {path}")
-            raise HTTPException(status_code=400, detail=f"文件不存在: {path}")
-        try:
-            f = open(path, 'rb')
-            opened_files_handles.append(f)
-            discord_files.append(discord.File(fp=f, filename=os.path.basename(path)))
-        except Exception as e:
-            logger.error(f"读取失败 {path}: {e}")
-            raise HTTPException(status_code=500, detail=f"文件读取失败: {e}")
+        if not os.path.exists(path): raise HTTPException(400, f"文件不存在: {path}")
+        f = open(path, 'rb')
+        opened_files.append(f)
+        discord_files.append(discord.File(f, filename=os.path.basename(path)))
 
     try:
         if request.cover: add_file(request.cover)
-        for path in request.attachment: add_file(path)
+        for p in request.attachment: add_file(p)
 
-        logger.info(f"正在创建新帖子...")
-        thread_with_message = await channel.create_thread(
-            name=request.title,
-            content=request.content,
-            files=discord_files,
-            applied_tags=applied_tags
+        applied_tags = []
+        if request.tags and isinstance(channel, discord.ForumChannel):
+            tag_map = {t.name.lower(): t for t in channel.available_tags}
+            for t in request.tags:
+                if t.lower() in tag_map: applied_tags.append(tag_map[t.lower()])
+
+        thread_with_msg = await channel.create_thread(
+            name=request.title, content=request.content, files=discord_files, applied_tags=applied_tags
         )
+        thread = thread_with_msg.thread
 
-        thread = thread_with_message.thread
-
-        # --- 3. 新帖创建成功，保存映射关系到数据库 ---
         if request.comic_id:
             try:
                 conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                # 使用 INSERT OR REPLACE 确保如果以前有残留记录被更新
-                c.execute("INSERT OR REPLACE INTO threads (comic_id, thread_id) VALUES (?, ?)",
-                          (request.comic_id, thread.id))
+                conn.execute("INSERT OR REPLACE INTO threads VALUES (?, ?)", (request.comic_id, thread.id))
                 conn.commit()
                 conn.close()
-                logger.info(f"数据库映射已保存: {request.comic_id} -> {thread.id}")
             except Exception as e:
-                logger.error(f"保存数据库映射失败: {e}")
+                logger.error(f"保存DB失败: {e}")
 
         return {"status": "success", "thread_id": thread.id, "url": thread.jump_url}
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"发布异常: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"发布失败: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
     finally:
-        for f in opened_files_handles:
-            if not f.closed: f.close()
+        for f in opened_files: f.close()
 
 
 if __name__ == "__main__":
