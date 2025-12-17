@@ -6,7 +6,7 @@ import sys
 import logging
 import sqlite3
 import datetime
-import aiohttp  # 引入 aiohttp 用于网络自检
+import aiohttp
 from logging.handlers import TimedRotatingFileHandler
 from contextlib import asynccontextmanager
 from discord.ext import commands
@@ -17,7 +17,6 @@ import uvicorn
 
 
 # ================= 1. 日志配置 =================
-
 def setup_logger():
     log_dir = "/data/logs"
     if not os.path.exists(log_dir):
@@ -86,7 +85,6 @@ def load_config():
         except Exception as e:
             logger.warning(f"读取配置文件出错: {e}")
 
-    # 环境变量覆盖
     env_token = os.getenv("DISCORD_TOKEN")
     if env_token: config["discord_token"] = env_token
 
@@ -107,7 +105,6 @@ def load_config():
         except ValueError:
             pass
 
-    # PROXY_URL 逻辑优化: 如果没设置，尝试读取系统 HTTP_PROXY
     env_proxy = os.getenv("PROXY_URL")
     if env_proxy:
         config["proxy_url"] = env_proxy
@@ -128,12 +125,16 @@ API_HOST = config.get("api_host", "0.0.0.0")
 API_PORT = config.get("api_port", 8000)
 PROXY_URL = config.get("proxy_url", "")
 
-# --- 关键修改：显式设置系统环境变量 ---
-# 这能确保底层网络库 (aiohttp/requests) 强制走代理，解决参数传递可能不生效的问题
+# --- 关键策略：仅使用环境变量 ---
+# 既然 curl 可用，说明环境没问题。我们强制 Python 读取环境变量，
+# 并移除代码中所有的显式代理传递，避免 aiohttp 内部逻辑冲突。
 if PROXY_URL:
     os.environ["http_proxy"] = PROXY_URL
     os.environ["https_proxy"] = PROXY_URL
-    logger.info(f"已设置系统代理环境变量: {PROXY_URL}")
+    # 同时设置大写版本，某些 Linux 系统或库敏感
+    os.environ["HTTP_PROXY"] = PROXY_URL
+    os.environ["HTTPS_PROXY"] = PROXY_URL
+    logger.info(f"已注入系统代理环境变量: {PROXY_URL}")
 
 
 # ================= 4. API 数据模型 =================
@@ -150,35 +151,32 @@ class PublishRequest(BaseModel):
 intents = discord.Intents.default()
 intents.message_content = True
 
-# 初始化 Bot
-# 注意：即使传了 proxy 参数，discord.py 有时也依赖系统环境变量。
-# 下面的 self-check 会帮我们验证 proxy 是否真正有效。
+# 修改点 1：移除 proxy 参数
+# 让 aiohttp 自己从 os.environ 中读取配置，这是最稳健的方式
 bot = commands.Bot(
     command_prefix="!",
-    intents=intents,
-    proxy=PROXY_URL if PROXY_URL else None
+    intents=intents
 )
 
 
-# --- 新增：网络自检函数 ---
-async def check_proxy_connection(proxy_url):
+# --- 网络自检函数 ---
+async def check_proxy_connection():
     """在启动 Bot 前测试代理连接是否真正通畅"""
     target_url = "https://discord.com"
     logger.info(f"正在进行网络自检 (目标: {target_url})...")
 
     try:
-        timeout = aiohttp.ClientTimeout(total=10)  # 10秒超时
-        async with aiohttp.ClientSession() as session:
-            # 注意：即使这里显式传了 proxy，aiohttp 也会读取我们刚刚设置的环境变量
-            async with session.get(target_url, proxy=proxy_url, timeout=timeout) as resp:
+        # 设置 trust_env=True (默认就是 True)，让它读取环境变量
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(trust_env=True) as session:
+            # 修改点 2：移除 proxy 参数
+            async with session.get(target_url, timeout=timeout) as resp:
                 logger.info(f"网络自检通过! 状态码: {resp.status}")
                 return True
     except asyncio.TimeoutError:
-        logger.error("网络自检失败: 连接超时 (Timeout)。请检查代理网速或防火墙。")
-    except aiohttp.ClientProxyConnectionError:
-        logger.error(f"网络自检失败: 无法连接到代理服务器 ({proxy_url})。请检查代理地址是否正确。")
-    except aiohttp.ClientSSLError:
-        logger.error("网络自检失败: SSL 证书验证错误。可能是代理服务器拦截了 HTTPS 证书。")
+        logger.error("网络自检失败: 连接超时。请检查宿主机防火墙是否允许 Docker 容器连接该端口。")
+    except aiohttp.ClientConnectionError as e:
+        logger.error(f"网络自检失败: 连接错误。可能是 DNS 解析失败或连接被拒绝。错误: {e}")
     except Exception as e:
         logger.error(f"网络自检失败: {type(e).__name__} - {e}")
 
@@ -187,33 +185,30 @@ async def check_proxy_connection(proxy_url):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 初始化数据库
     init_db()
 
-    # 打印代理信息
     if PROXY_URL:
-        logger.info(f"配置代理: {PROXY_URL}")
-        # 执行自检 (这步很关键，能告诉你为什么卡住)
-        is_connected = await check_proxy_connection(PROXY_URL)
+        # 修改点 3：调用无参自检
+        is_connected = await check_proxy_connection()
         if not is_connected:
-            logger.warning("⚠️ 警告: 代理连接测试失败，Bot 可能会启动失败或卡住。")
+            logger.warning("⚠️ 警告: 自检失败，正在尝试强行启动 Bot...")
     else:
-        logger.info("未配置代理 (直连模式)")
+        logger.info("直连模式 (无代理)")
 
     logger.info("正在启动 Discord Bot...")
-    bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
-
-    yield
-
-    logger.info("服务关闭中...")
-    if not bot.is_closed():
-        await bot.close()
     try:
-        await bot_task
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        logger.error(f"关闭 Bot 错误: {e}")
+        bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
+        yield
+    finally:
+        logger.info("服务关闭中...")
+        if not bot.is_closed():
+            await bot.close()
+        try:
+            await bot_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Bot关闭异常: {e}")
 
 
 app = FastAPI(title="Discord Bot API Bridge", lifespan=lifespan)
@@ -236,7 +231,7 @@ async def publish_post(request: PublishRequest):
     logger.info(f"收到请求 | Title: {request.title} | ComicID: {request.comic_id}")
     await bot.wait_until_ready()
 
-    # 1. 查重逻辑
+    # 1. 查重
     if request.comic_id:
         existing_thread_id = None
         try:
@@ -261,7 +256,7 @@ async def publish_post(request: PublishRequest):
             except Exception as e:
                 logger.error(f"回复出错: {e}")
 
-    # 2. 新建逻辑
+    # 2. 新建
     channel = bot.get_channel(TARGET_FORUM_CHANNEL_ID)
     if not channel: raise HTTPException(500, "Bot未连接或找不到频道")
 
