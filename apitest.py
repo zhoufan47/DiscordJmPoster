@@ -34,11 +34,12 @@ def send_post_request(cover_path, doc_path):
 
     # 构造 JSON Body
     payload = {
-        "title": "API 自动化测试帖子",
-        "content": "这是一条通过 Python 脚本自动发送的测试帖子。\n包含封面和附件。",
-        "cover": abs_cover_path,
-        "tags": ["测试", "自动"],  # 确保你的 Discord 频道里有这些标签，否则会被忽略
-        "attachment": [
+        "comic_id" : "7895123",
+        "title": "API 自动化测试帖子",  #帖子标题，即漫画标题
+        "content": "这是一条通过 Python 脚本自动发送的测试帖子。\n包含封面和附件。", #实际因为漫画简介内容，包含画师信息等
+        "cover": abs_cover_path, # 封面图片的绝对路径
+        "tags": ["测试", "自动"],  # 获取的漫画tag
+        "attachment": [     # 漫画pdf路径
             abs_doc_path
         ]
     }
