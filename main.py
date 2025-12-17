@@ -18,7 +18,7 @@ import uvicorn
 # ================= 1. 日志配置 (Logger Setup) =================
 
 def setup_logger():
-    log_dir = "logs"
+    log_dir = "/data/logs"
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
