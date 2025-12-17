@@ -47,8 +47,7 @@ def setup_logger():
 
 logger = setup_logger()
 
-# ================= 2. 数据库配置 (SQLite) =================
-# 将数据库放在 data 目录，确保 Docker 挂载能持久化保存
+# ================= 2. 数据库配置 =================
 DB_PATH = "/data/comic_threads.db"
 
 
@@ -96,7 +95,7 @@ def load_config():
         try:
             config["target_forum_channel_id"] = int(env_channel)
         except ValueError:
-            logger.error("环境变量 TARGET_FORUM_CHANNEL_ID 必须是数字")
+            pass
 
     env_host = os.getenv("API_HOST")
     if env_host: config["api_host"] = env_host
@@ -108,15 +107,15 @@ def load_config():
         except ValueError:
             pass
 
+    # PROXY_URL 逻辑优化: 如果没设置，尝试读取系统 HTTP_PROXY
     env_proxy = os.getenv("PROXY_URL")
-    if env_proxy: config["proxy_url"] = env_proxy
+    if env_proxy:
+        config["proxy_url"] = env_proxy
+    elif os.getenv("HTTP_PROXY"):
+        config["proxy_url"] = os.getenv("HTTP_PROXY")
 
-    if not config["discord_token"] or config["discord_token"] == "YOUR_TOKEN_HERE":
-        logger.error("未配置 DISCORD_TOKEN。")
-        sys.exit(1)
-
-    if config["target_forum_channel_id"] == 0:
-        logger.error("未配置 TARGET_FORUM_CHANNEL_ID。")
+    if not config["discord_token"]:
+        logger.error("未配置 DISCORD_TOKEN")
         sys.exit(1)
 
     return config
@@ -128,6 +127,13 @@ TARGET_FORUM_CHANNEL_ID = config["target_forum_channel_id"]
 API_HOST = config.get("api_host", "0.0.0.0")
 API_PORT = config.get("api_port", 8000)
 PROXY_URL = config.get("proxy_url", "")
+
+# --- 关键修改：显式设置系统环境变量 ---
+# 这能确保底层网络库 (aiohttp/requests) 强制走代理，解决参数传递可能不生效的问题
+if PROXY_URL:
+    os.environ["http_proxy"] = PROXY_URL
+    os.environ["https_proxy"] = PROXY_URL
+    logger.info(f"已设置系统代理环境变量: {PROXY_URL}")
 
 
 # ================= 4. API 数据模型 =================
@@ -163,6 +169,7 @@ async def check_proxy_connection(proxy_url):
     try:
         timeout = aiohttp.ClientTimeout(total=10)  # 10秒超时
         async with aiohttp.ClientSession() as session:
+            # 注意：即使这里显式传了 proxy，aiohttp 也会读取我们刚刚设置的环境变量
             async with session.get(target_url, proxy=proxy_url, timeout=timeout) as resp:
                 logger.info(f"网络自检通过! 状态码: {resp.status}")
                 return True
@@ -180,8 +187,6 @@ async def check_proxy_connection(proxy_url):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("正在启动 API 服务与 Discord Bot...")
-
     # 初始化数据库
     init_db()
 
