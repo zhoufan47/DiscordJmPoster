@@ -67,7 +67,7 @@ def init_db():
 
 
 # ================= 3. 配置加载逻辑 =================
-CONFIG_FILE = "data/config.json"
+CONFIG_FILE = "/data/config.json"
 
 
 def load_config():
