@@ -9,11 +9,6 @@ ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 设置基础参数配置
-ENV API_HOST=0.0.0.0
-ENV API_PORT=8000
-ENV PROXY_URL=http://127.0.0.1:7890
-ENV DISCORD_TOKEN=your_discord_token
-ENV TARGET_FORUM_CHANNEL_ID=your_target_forum_channel_id
 
 # 复制依赖文件并安装
 COPY requirements.txt .
