@@ -48,7 +48,7 @@ logger = setup_logger()
 
 # ================= 2. 数据库配置 (SQLite) =================
 # 将数据库放在 data 目录，确保 Docker 挂载能持久化保存
-DB_PATH = "data/comic_threads.db"
+DB_PATH = "/data/comic_threads.db"
 
 
 def init_db():
@@ -69,7 +69,7 @@ def init_db():
 
 
 # ================= 3. 配置加载逻辑 =================
-CONFIG_FILE = "config.json"
+CONFIG_FILE = "/data/config.json"
 
 
 def load_config():
