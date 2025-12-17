@@ -26,8 +26,7 @@ COPY main.py .
 
 # 创建必要的目录
 RUN mkdir -p logs
-# 创建一个数据目录，用于挂载外部文件
-RUN mkdir -p /app/data
+
 
 # 暴露端口
 EXPOSE 8000
