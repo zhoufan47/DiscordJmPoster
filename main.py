@@ -6,7 +6,7 @@ import sys
 import logging
 import sqlite3
 import datetime
-import aiohttp  # 引入 aiohttp 用于网络自检
+import aiohttp
 from logging.handlers import TimedRotatingFileHandler
 from contextlib import asynccontextmanager
 from discord.ext import commands
@@ -73,8 +73,6 @@ def load_config():
     config = {
         "discord_token": "",
         "target_forum_channel_id": 0,
-        "api_host": "0.0.0.0",
-        "api_port": 8000,
         "proxy_url": ""
     }
 
@@ -97,16 +95,6 @@ def load_config():
         except ValueError:
             pass
 
-    env_host = os.getenv("API_HOST")
-    if env_host: config["api_host"] = env_host
-
-    env_port = os.getenv("API_PORT")
-    if env_port:
-        try:
-            config["api_port"] = int(env_port)
-        except ValueError:
-            pass
-
     # PROXY_URL 逻辑优化: 如果没设置，尝试读取系统 HTTP_PROXY
     env_proxy = os.getenv("PROXY_URL")
     if env_proxy:
@@ -124,8 +112,6 @@ def load_config():
 config = load_config()
 DISCORD_TOKEN = config["discord_token"]
 TARGET_FORUM_CHANNEL_ID = config["target_forum_channel_id"]
-API_HOST = config.get("api_host", "0.0.0.0")
-API_PORT = config.get("api_port", 8000)
 PROXY_URL = config.get("proxy_url", "")
 
 # --- 关键修改：显式设置系统环境变量 ---
@@ -151,8 +137,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 # 初始化 Bot
-# 注意：即使传了 proxy 参数，discord.py 有时也依赖系统环境变量。
-# 下面的 self-check 会帮我们验证 proxy 是否真正有效。
 bot = commands.Bot(
     command_prefix="!",
     intents=intents,
@@ -160,7 +144,6 @@ bot = commands.Bot(
 )
 
 
-# --- 新增：网络自检函数 ---
 async def check_proxy_connection(proxy_url):
     """在启动 Bot 前测试代理连接是否真正通畅"""
     target_url = "https://discord.com"
@@ -169,7 +152,6 @@ async def check_proxy_connection(proxy_url):
     try:
         timeout = aiohttp.ClientTimeout(total=10)  # 10秒超时
         async with aiohttp.ClientSession() as session:
-            # 注意：即使这里显式传了 proxy，aiohttp 也会读取我们刚刚设置的环境变量
             async with session.get(target_url, proxy=proxy_url, timeout=timeout) as resp:
                 logger.info(f"网络自检通过! 状态码: {resp.status}")
                 return True
@@ -193,7 +175,6 @@ async def lifespan(app: FastAPI):
     # 打印代理信息
     if PROXY_URL:
         logger.info(f"配置代理: {PROXY_URL}")
-        # 执行自检 (这步很关键，能告诉你为什么卡住)
         is_connected = await check_proxy_connection(PROXY_URL)
         if not is_connected:
             logger.warning("⚠️ 警告: 代理连接测试失败，Bot 可能会启动失败或卡住。")
@@ -310,4 +291,4 @@ async def publish_post(request: PublishRequest):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=API_HOST, port=API_PORT)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
