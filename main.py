@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 import uvicorn
+import opencc
 
 
 # ================= 1. 日志配置 =================
@@ -289,6 +290,9 @@ async def publish_post(request: PublishRequest):
     finally:
         for f in opened_files: f.close()
 
+def convert_traditional_to_simplified(text):
+    converter = opencc.OpenCC('t2s.json')
+    return converter.convert(text)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
