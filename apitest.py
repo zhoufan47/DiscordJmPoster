@@ -34,7 +34,7 @@ def send_post_request(cover_path, doc_path):
 
     # 构造 JSON Body
     payload = {
-        "comic_id" : "7895123",
+        "comic_id" : "12345678",
         "title": "API 自动化测试帖子",  #帖子标题，即漫画标题
         "content": "这是一条通过 Python 脚本自动发送的测试帖子。\n包含封面和附件。", #实际因为漫画简介内容，包含画师信息等
         "cover": abs_cover_path, # 封面图片的绝对路径

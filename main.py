@@ -14,7 +14,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 import uvicorn
-import opencc
 
 
 # ================= 1. 日志配置 =================
