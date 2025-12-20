@@ -264,7 +264,6 @@ async def publish_post(request: PublishRequest):
         if request.tags and isinstance(channel, discord.ForumChannel):
             tag_map = {t.name.lower(): t for t in channel.available_tags}
             for t in request.tags:
-                sct = convert_traditional_to_simplified(t)
                 if sct in tag_map: applied_tags.append(tag_map[sct])
 
         thread_with_msg = await channel.create_thread(
