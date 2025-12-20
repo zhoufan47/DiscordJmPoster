@@ -269,7 +269,7 @@ async def publish_post(request: PublishRequest):
         if request.tags and isinstance(channel, discord.ForumChannel):
             tag_map = {t.name.lower(): t for t in channel.available_tags}
             for t in request.tags:
-                if t in tag_map: applied_tags.append(tag_map[t])
+                if t.lower() in tag_map: applied_tags.append(tag_map[t.lower()])
 
         thread_with_msg = await channel.create_thread(
             name=request.title, content=request.content, files=discord_files, applied_tags=applied_tags
