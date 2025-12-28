@@ -216,7 +216,12 @@ async def root():
 async def publish_post(request: PublishRequest):
     logger.info(f"收到请求 | Title: {request.title} | ComicID: {request.comic_id}")
     logger.info(f"Content: {request.content} | Tags: {request.tags}")
-    await bot.wait_until_ready()
+    if not bot.is_ready():
+        # 尝试等待10秒，如果还没好就报错，避免请求无限挂起
+        try:
+            await asyncio.wait_for(bot.wait_until_ready(), timeout=10.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(503, "Bot 尚未准备就绪，请稍后重试")
 
     # 1. 查重逻辑
     if request.comic_id:
@@ -253,9 +258,9 @@ async def publish_post(request: PublishRequest):
     def add_file(path):
         if not path: return
         if not os.path.exists(path): raise HTTPException(400, f"文件不存在: {path}")
-        f = open(path, 'rb')
-        opened_files.append(f)
-        discord_files.append(discord.File(f, filename=os.path.basename(path)))
+        files = open(path, 'rb')
+        opened_files.append(files)
+        discord_files.append(discord.File(files, filename=os.path.basename(path)))
 
     try:
         if request.cover: add_file(request.cover)
@@ -263,8 +268,12 @@ async def publish_post(request: PublishRequest):
         applied_tags = []
         if request.tags and isinstance(channel, discord.ForumChannel):
             tag_map = {t.name.lower(): t for t in channel.available_tags}
+            tags_count = 0
             for t in request.tags:
-                if t in tag_map: applied_tags.append(tag_map[t])
+                if tags_count >= 5: break
+                if t.lower() in tag_map:
+                    applied_tags.append(tag_map[t.lower()])
+                    tags_count = tags_count + 1
 
         thread_with_msg = await channel.create_thread(
             name=request.title, content=request.content, files=discord_files, applied_tags=applied_tags
@@ -281,7 +290,9 @@ async def publish_post(request: PublishRequest):
                 logger.error(f"保存DB失败: {e}")
 
         return {"status": "success", "thread_id": thread.id, "url": thread.jump_url}
-
+    except HTTPException as e:
+        logger.error(f"服务器请求异常: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
     except Exception as e:
         logger.error(f"发布失败: {e}", exc_info=True)
         raise HTTPException(500, str(e))
